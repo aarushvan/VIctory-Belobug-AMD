@@ -1765,11 +1765,7 @@ impl State {
                         continue;
                     };
                     // The shader adds the bytes a raw view begins early by.
-                    let biased = srv
-                        && t.host.user_data.iter().any(|u| {
-                            u.slot == slot
-                                && u.root == RootType::Other(victory_shader::emit::USER_VIEW_BIAS)
-                        });
+                    let biased = srv && t.root_view_biases.contains(slot);
                     if tabled {
                         if !self.root_srv_table(list, Some(address), param, compute, biased) {
                             return false;

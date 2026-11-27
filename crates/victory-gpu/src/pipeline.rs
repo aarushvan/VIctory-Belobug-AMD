@@ -136,6 +136,7 @@ pub(crate) struct Translated {
     pub(crate) threads: Option<[u32; 3]>,
     pub(crate) used: Vec<victory_shader::UsedResource>,
     pub(crate) tables: crate::draw::TablePlan,
+    pub(crate) root_view_biases: RootViewBiases,
     /// Whether the shader's code can store to buffer memory ([`stores`]);
     /// true when its code is not known.
     pub(crate) stores: bool,
@@ -144,6 +145,28 @@ pub(crate) struct Translated {
     /// Whether it stores through a view it picks from the heap by an index,
     /// once asked (`crate::picked`).
     pub(crate) picks: std::sync::atomic::AtomicU8,
+}
+
+/// Root slots whose shader metadata asks for a view's alignment bias.
+#[cfg(windows)]
+pub(crate) struct RootViewBiases([u64; 4]);
+
+#[cfg(windows)]
+impl RootViewBiases {
+    fn new(user_data: &[victory_shader::emit::UserData]) -> Self {
+        use victory_shader::{RootType, emit::USER_VIEW_BIAS};
+        let mut slots = [0; 4];
+        for word in user_data {
+            if word.root == RootType::Other(USER_VIEW_BIAS) {
+                slots[usize::from(word.slot / 64)] |= 1 << (word.slot % 64);
+            }
+        }
+        Self(slots)
+    }
+
+    pub(crate) fn contains(&self, slot: u8) -> bool {
+        self.0[usize::from(slot / 64)] & (1 << (slot % 64)) != 0
+    }
 }
 
 #[cfg(windows)]
@@ -232,11 +255,13 @@ fn translate(container: &[u8]) -> Result<Translated, String> {
         .map(|p| p.used)
         .unwrap_or_default();
     let tables = crate::draw::TablePlan::new(&used, &host.root_indexed_views);
+    let root_view_biases = RootViewBiases::new(&host.user_data);
     Ok(Translated {
         host,
         threads,
         used,
         tables,
+        root_view_biases,
         stores,
         stores_by_address,
         picks: Default::default(),
@@ -802,6 +827,37 @@ pub fn save_pipeline_cache() {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn root_view_biases_match_the_shader_user_data() {
+        use victory_shader::RootType;
+        use victory_shader::emit::{USER_VIEW_BIAS, UserData};
+        let mut words: Vec<_> = [0, 63, 64, 127, 128, 191, 192, 255]
+            .into_iter()
+            .map(|slot| UserData {
+                index: 0,
+                slot,
+                root: RootType::Other(USER_VIEW_BIAS),
+                dword: 0,
+            })
+            .collect();
+        words.push(UserData {
+            index: 1,
+            slot: 42,
+            root: RootType::Constants,
+            dword: 0,
+        });
+        let biases = super::RootViewBiases::new(&words);
+        for slot in 0..=u8::MAX {
+            assert_eq!(
+                biases.contains(slot),
+                words.iter().any(|word| {
+                    word.slot == slot && word.root == RootType::Other(USER_VIEW_BIAS)
+                }),
+            );
+        }
+    }
+
     #[cfg(all(windows, feature = "diagnostics"))]
     #[test]
     fn skip_hashes_accepts_full_hashes_only() {

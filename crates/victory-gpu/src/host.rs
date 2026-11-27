@@ -4199,6 +4199,24 @@ impl Host {
         })
     }
 
+    /// Whether the host can sample anisotropically with point mip selection.
+    pub(crate) fn anisotropic_point_mip(&self) -> bool {
+        static SUPPORTED: OnceLock<bool> = OnceLock::new();
+        *SUPPORTED.get_or_init(|| {
+            let mut options = D3D12_FEATURE_DATA_D3D12_OPTIONS19::default();
+            // SAFETY: the device query writes the structure of the given size.
+            // Older runtimes that reject OPTIONS19 use the sampler fallback.
+            let supported = unsafe {
+                self.device.CheckFeatureSupport(
+                    D3D12_FEATURE_D3D12_OPTIONS19,
+                    (&raw mut options).cast(),
+                    size_of_val(&options) as u32,
+                )
+            };
+            supported.is_ok() && options.AnisoFilterWithPointMipSupported.as_bool()
+        })
+    }
+
     /// Whether the host GPU supports the depth bounds test; logged once.
     pub(crate) fn depth_bounds(&self) -> bool {
         static BOUNDS: OnceLock<bool> = OnceLock::new();

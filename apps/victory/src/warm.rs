@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -154,7 +155,7 @@ fn run_batches(
                         }
                         let outcome = start(rest)
                             .context("could not start warm worker")
-                            .and_then(|process| child(process, &each));
+                            .and_then(|process| child(process, LONGEST, &each));
                         match outcome {
                             Ok(Some((made, why))) => {
                                 let remaining = &rest[made.min(rest.len())..];
@@ -198,29 +199,42 @@ fn start_worker(these: &[usize]) -> Result<Child> {
 }
 
 /// On abnormal exit, return the number of reports before the failure and the exit reason.
-fn child(mut process: Child, mut each: impl FnMut(usize, f64, bool)) -> Result<Option<(usize, String)>> {
+fn child(
+    mut process: Child,
+    timeout: Duration,
+    mut each: impl FnMut(usize, f64, bool),
+) -> Result<Option<(usize, String)>> {
     let Some(out) = process.stdout.take() else {
         let _ = process.kill();
         process.wait().context("warm worker stdout unavailable, failed to reap worker")?;
         anyhow::bail!("warm worker stdout unavailable");
     };
     let process = Mutex::new(process);
-    let (heard, over) = (Mutex::new(Instant::now()), AtomicBool::new(false));
+    let heard = Mutex::new(Instant::now());
     let hung = AtomicBool::new(false);
     let mut made = 0;
-    std::thread::scope(|s| {
-        s.spawn(|| {
-            while !over.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(500));
-                if lock(&heard).elapsed() > LONGEST {
+    let status = std::thread::scope(|s| {
+        let (_finished, worker_finished) = mpsc::channel::<()>();
+        let (process, heard, hung) = (&process, &heard, &hung);
+        s.spawn(move || loop {
+            let remaining = timeout.saturating_sub(lock(heard).elapsed());
+            if !matches!(
+                worker_finished.recv_timeout(remaining),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ) {
+                break;
+            }
+            if lock(heard).elapsed() >= timeout {
+                let mut process = lock(process);
+                if matches!(process.try_wait(), Ok(None)) {
                     hung.store(true, Ordering::Relaxed);
-                    let _ = lock(&process).kill();
-                    return;
+                    let _ = process.kill();
                 }
+                break;
             }
         });
         for line in BufReader::new(out).lines().map_while(Result::ok) {
-            *lock(&heard) = Instant::now();
+            *lock(heard) = Instant::now();
             let mut words = line.split(' ');
             if words.next() == Some("made")
                 && let (Some(n), Some(ms), Some(there)) = (words.next(), words.next(), words.next())
@@ -230,15 +244,23 @@ fn child(mut process: Child, mut each: impl FnMut(usize, f64, bool)) -> Result<O
                 each(n, ms, there == "1");
             }
         }
-        over.store(true, Ordering::Relaxed);
+        // Stdout can close before the process exits. Keep the watchdog active
+        // and release the process lock between polls so it can stop a hang.
+        loop {
+            let status = lock(process).try_wait();
+            match status {
+                Ok(Some(status)) => break Ok(status),
+                Err(error) => break Err(error),
+                Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
     });
-    let status = lock(&process).wait();
     let well = status.as_ref().is_ok_and(|s| s.success());
     if well {
         return Ok(None);
     }
     let why = if hung.load(Ordering::Relaxed) {
-        format!("hung for {} s", LONGEST.as_secs())
+        format!("hung for {} s", timeout.as_secs())
     } else {
         status.map_or_else(|e| e.to_string(), |s| format!("{s}"))
     };
@@ -341,6 +363,22 @@ mod tests {
         assert_eq!(bad.len(), 1);
         assert_eq!(bad[0].0, 8);
         assert!(!bad[0].1.is_empty());
+    }
+
+    #[test]
+    fn timed_out_worker_keeps_the_reports_it_already_sent() {
+        let process = fake_child(
+            "echo made 7 3.5 1&for /l %i in (1,1,1000000000) do @rem",
+            Stdio::piped(),
+        )
+        .unwrap();
+        let mut done = Vec::new();
+        let failure = child(process, Duration::from_secs(3), |n, ms, there| {
+            done.push((n, ms, there));
+        })
+        .unwrap();
+        assert_eq!(done, [(7, 3.5, true)]);
+        assert_eq!(failure, Some((1, "hung for 3 s".to_owned())));
     }
 
     #[test]

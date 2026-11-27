@@ -1,0 +1,21 @@
+name: Windows launcher regression
+
+on:
+  push:
+    branches: [validation/launcher-windows]
+
+permissions:
+  contents: read
+
+jobs:
+  launcher:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        powershell: [powershell.exe, pwsh.exe]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Exercise the launcher with a synthetic executable
+        run: python .github/test-tools/verify-launcher.py scripts/play.ps1 --powershell ${{ matrix.powershell }}

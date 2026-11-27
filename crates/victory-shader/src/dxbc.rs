@@ -68,6 +68,11 @@ const MAX_PARTS: usize = 256;
 
 impl<'a> Container<'a> {
     pub fn parse(data: &'a [u8]) -> Result<Self, ShaderError> {
+        Self::parse_prefix(data).map(|(container, _)| container)
+    }
+
+    /// Parses the container and returns its exact bytes, excluding trailing data.
+    pub fn parse_prefix(data: &'a [u8]) -> Result<(Self, &'a [u8]), ShaderError> {
         if data.len() < HEADER_SIZE || &data[0..4] != b"DXBC" {
             return Err(ShaderError::NotDxbc);
         }
@@ -101,11 +106,14 @@ impl<'a> Container<'a> {
                 data: body,
             });
         }
-        Ok(Container {
-            digest,
-            version,
-            parts,
-        })
+        Ok((
+            Container {
+                digest,
+                version,
+                parts,
+            },
+            data,
+        ))
     }
 
     pub fn part(&self, fourcc: FourCC) -> Option<&Part<'a>> {

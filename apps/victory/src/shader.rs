@@ -44,12 +44,10 @@ pub(crate) fn sources(data: &[u8]) -> Vec<Source<'_>> {
     if sgd5::is_sgd5(data) {
         out.extend(sgd5::records(data).map(Source::Packed));
     }
-    let raw = memchr::memmem::find_iter(data, b"DXBC")
-        .filter(|&offset| Container::parse(&data[offset..]).is_ok())
-        .map(|offset| Source::Raw {
-            offset,
-            data: &data[offset..],
-        });
+    let raw = memchr::memmem::find_iter(data, b"DXBC").filter_map(|offset| {
+        let (_, data) = Container::parse_prefix(&data[offset..]).ok()?;
+        Some(Source::Raw { offset, data })
+    });
     out.extend(raw);
     out
 }
@@ -218,4 +216,33 @@ fn format_instruction(i: &Instruction, wave64: bool) -> String {
         None => format!("<{:?} {:#x}>", i.encoding, i.opcode),
     };
     format!("    {:06x}: {:<44} {text}", i.offset, words.join(" "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raw_sources_hash_only_the_container() {
+        let mut shader = [0; 32];
+        shader[..4].copy_from_slice(b"DXBC");
+        shader[0x14..0x16].copy_from_slice(&1u16.to_le_bytes());
+        shader[0x18..0x1c].copy_from_slice(&32u32.to_le_bytes());
+
+        let mut image = vec![0; 16];
+        image.extend_from_slice(&shader);
+        image.extend_from_slice(&[0; 64]);
+        image.extend_from_slice(&shader);
+        image.extend_from_slice(b"DXBC truncated");
+
+        let found = sources(&image);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].label(), "@0x10");
+        assert_eq!(found[1].label(), "@0x70");
+        for source in found {
+            let bytes = source.bytes().unwrap();
+            assert_eq!(bytes.as_ref(), &shader);
+            assert_eq!(blake3::hash(&bytes), blake3::hash(&shader));
+        }
+    }
 }

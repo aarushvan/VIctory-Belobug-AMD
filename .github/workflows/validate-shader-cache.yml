@@ -20,3 +20,6 @@ jobs:
       - run: cargo test --locked -p victory warm::tests
       - run: cargo test --locked -p victory-shader --lib emit::bitcode::opt::tests
       - run: cargo test --locked -p victory-gpu --all-features --lib draw::tests
+      - run: cargo test --locked -p victory-gpu --all-features --lib pipeline::tests::root_view_biases_match_the_shader_user_data
+      - run: cargo test --locked -p victory-shader --lib translating_decoded_programs_matches_translating_the_container
+      - run: cargo test --locked -p victory-shader --lib emit::sampler::tests

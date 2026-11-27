@@ -96,6 +96,23 @@ impl TableGroup {
         Some(&self.entries[self.by_descriptor[i].1])
     }
 
+    /// Walk the declarations and sorted, deduplicated dynamic selections
+    /// alongside the slots of a new snapshot.
+    fn snapshot_slots<'a>(
+        &'a self,
+        count: u32,
+        selected: &'a [u32],
+    ) -> impl Iterator<Item = (u32, Option<&'a UsedResource>, bool)> + 'a {
+        let mut declared = self.by_descriptor.iter().copied().peekable();
+        let mut picked = selected.iter().copied().peekable();
+        (0..count).map(move |index| {
+            let used = declared
+                .next_if(|(slot, _)| *slot == index)
+                .map(|(_, entry)| &self.entries[entry]);
+            (index, used, picked.next_if_eq(&index).is_some())
+        })
+    }
+
     fn needs_snapshot(&self, heap: &crate::descriptor::Heap, host_count: u32, table: u64) -> bool {
         let index_at = |dword: u32| {
             table
@@ -3560,8 +3577,14 @@ impl State {
             // which may lie over slots shaders pick by index, only the ones
             // the shader names.)
             if let Some(title) = title_first {
-                for k in (0..n).filter(|&k| n <= 64 || group.entry(k).is_some()) {
-                    host.slot_tabled(title + k);
+                if n <= 64 {
+                    for k in 0..n {
+                        host.slot_tabled(title + k);
+                    }
+                } else {
+                    for &(k, _) in &group.by_descriptor {
+                        host.slot_tabled(title + k);
+                    }
                 }
             }
             let list_views = crate::descriptor::host::list_views();
@@ -3572,7 +3595,7 @@ impl State {
             let recording = self.recording;
             // The whole range: a shader may index past the entries its
             // used-resource list names (descriptor arrays).
-            for k in 0..n {
+            for (k, used, picked) in group.snapshot_slots(n, &selected) {
                 let index = first + k;
                 // A view this list has made before: its descriptor copied,
                 // and nothing more if nothing changed in the list since.
@@ -3580,10 +3603,9 @@ impl State {
                     && let Some(words) = crate::descriptor::record_at(table + u64::from(k) * 32)
                     && let Some(mut listed) = host.make_listed(recording, words, index)
                 {
-                    let kind = group
-                        .entry(k)
+                    let kind = used
                         .map(|u| u.kind)
-                        .or_else(|| selected.binary_search(&k).ok().and(listed.kind));
+                        .or(if picked { listed.kind } else { None });
                     let was = (listed.ready, listed.tabled);
                     if let Some(kind) = kind {
                         let tested = TESTED_DEPTH.get();
@@ -3616,7 +3638,6 @@ impl State {
                     }
                     continue;
                 }
-                let used = group.entry(k);
                 match crate::descriptor::view(table + u64::from(k) * 32) {
                     Some(View::Constant(address, size)) => {
                         // Renderer port 5: title memory in place is the
@@ -3643,9 +3664,9 @@ impl State {
                     }
                     Some(view) => {
                         host.make_at(index, &view);
-                        let kind = used.map(|u| u.kind).or_else(|| {
-                            selected.binary_search(&k).ok().and_then(|_| view_kind(&view))
-                        });
+                        let kind = used
+                            .map(|u| u.kind)
+                            .or_else(|| if picked { view_kind(&view) } else { None });
                         if let Some(kind) = kind {
                             readable(list, kind, &view);
                         }
@@ -4708,7 +4729,44 @@ fn staging_budget_per_frame(vram_budget: Option<u64>) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::staging_budget_per_frame;
+    use super::{ResourceType, RootType, TablePlan, UsedResource, staging_budget_per_frame};
+
+    #[test]
+    fn descriptor_snapshot_preserves_first_declarations_and_dynamic_slots() {
+        let resource = |kind, descriptor: u32| UsedResource {
+            kind,
+            root: RootType::Table,
+            table_offset_dwords: descriptor * 8,
+            lower_bound: 0,
+            stride: 0,
+            dwords: 8,
+            user_data: 0,
+            slot: 0,
+        };
+        let plan = TablePlan::new(
+            &[
+                resource(ResourceType::Srv, 3),
+                resource(ResourceType::Uav, 3),
+                resource(ResourceType::Cbv, 0),
+            ],
+            &[],
+        );
+        let slots: Vec<_> = plan.groups[0]
+            .snapshot_slots(6, &[1, 3, 5])
+            .map(|(k, used, picked)| (k, used.map(|u| u.kind), picked))
+            .collect();
+        assert_eq!(
+            slots,
+            [
+                (0, Some(ResourceType::Cbv), false),
+                (1, None, true),
+                (2, None, false),
+                (3, Some(ResourceType::Srv), true),
+                (4, None, false),
+                (5, None, true),
+            ]
+        );
+    }
 
     #[test]
     fn staging_budget_scales_with_vram_budget() {

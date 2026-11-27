@@ -1,0 +1,17 @@
+name: Windows shader cache regression
+
+on:
+  push:
+    branches: [validation/shader-cache-windows]
+
+permissions:
+  contents: read
+
+jobs:
+  shader:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install
+      - run: cargo test --locked -p victory shader::

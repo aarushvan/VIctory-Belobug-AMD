@@ -1,0 +1,17 @@
+name: Windows save and cache regression
+
+on:
+  push:
+    branches: [validation/save-cache-windows]
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install
+      - run: cargo test --locked -p victory-core -p victory-pipeline -p xtask

@@ -30,7 +30,7 @@
 //! Which passes run is `emit::shader_opt()` (`VICTORY_SHADER_OPT`), part of
 //! the translation and so of the shader cache's key.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::Entry};
 
 use super::{
     Attr, Bin, Cast, Const, Func, MdDef, Module, Op, Term, Ty, TypeDef, V, for_each_operand, pred,
@@ -866,20 +866,20 @@ impl Module {
                     // The type too: an undefined value of one type is not
                     // that of another.
                     key.push((ty.0 as usize, V::Global(u32::MAX)));
-                    match joins.get(&key) {
-                        Some(&first) => {
-                            repl[p as usize] = Some(first);
+                    match joins.entry(key) {
+                        Entry::Occupied(entry) => {
+                            repl[p as usize] = Some(*entry.get());
                             changed = true;
                         }
-                        None => {
-                            joins.insert(key, V::Inst(p));
+                        Entry::Vacant(entry) => {
+                            entry.insert(V::Inst(p));
                         }
                     }
                 }
             }
-            let body = std::mem::take(&mut self.blocks[b].body);
-            let mut kept = Vec::with_capacity(body.len());
-            for i in body {
+            // Keep the existing allocation when filtering this block's instructions.
+            let mut body = std::mem::take(&mut self.blocks[b].body);
+            body.retain(|&i| {
                 map_operands(&mut self.insts[i as usize].op, |v| {
                     let v = resolve(&repl, v);
                     let bit = known_bit(&facts, v);
@@ -891,27 +891,31 @@ impl Module {
                 {
                     repl[i as usize] = Some(if holds { yes } else { no });
                     changed = true;
-                    continue;
+                    return false;
                 }
                 if passes & FOLD != 0
                     && let Some(v) = self.simplify(i, &mut changed)
                 {
                     repl[i as usize] = Some(v);
                     changed = true;
-                    continue;
+                    return false;
                 }
                 let class = self.class(&effects, i);
                 if passes & REUSE != 0
                     && class == Effect::Pure
                     && let Some(key) = self.key(i)
                 {
-                    if let Some(&first) = known.get(&key) {
-                        repl[i as usize] = Some(first);
-                        changed = true;
-                        continue;
+                    match known.entry(key) {
+                        Entry::Occupied(entry) => {
+                            repl[i as usize] = Some(*entry.get());
+                            changed = true;
+                            return false;
+                        }
+                        Entry::Vacant(entry) => {
+                            added.push(entry.key().clone());
+                            entry.insert(V::Inst(i));
+                        }
                     }
-                    known.insert(key.clone(), V::Inst(i));
-                    added.push(key);
                 }
                 // Reads of memory, and wave operations (the same lanes run
                 // the whole block): the block's own earlier one.
@@ -919,19 +923,23 @@ impl Module {
                     && matches!(class, Effect::Reads | Effect::Lanes)
                     && let Some(key) = self.key(i)
                 {
-                    if let Some(&first) = read.get(&key) {
-                        repl[i as usize] = Some(first);
-                        changed = true;
-                        continue;
+                    match read.entry(key) {
+                        Entry::Occupied(entry) => {
+                            repl[i as usize] = Some(*entry.get());
+                            changed = true;
+                            return false;
+                        }
+                        Entry::Vacant(entry) => {
+                            entry.insert(V::Inst(i));
+                        }
                     }
-                    read.insert(key, V::Inst(i));
                 }
                 if class == Effect::Writes {
                     read.clear();
                 }
-                kept.push(i);
-            }
-            self.blocks[b].body = kept;
+                true
+            });
+            self.blocks[b].body = body;
             if let Some(Term::CondBr(c, t, f)) = self.blocks[b].term {
                 let c = known_bit(&facts, resolve(&repl, c));
                 self.blocks[b].term = Some(Term::CondBr(c, t, f));

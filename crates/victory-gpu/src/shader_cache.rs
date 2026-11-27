@@ -171,8 +171,14 @@ pub fn precompile(container: &[u8]) -> Result<bool, String> {
 
 /// The translation of a console shader container, from the cache when
 /// there is one.
-pub(crate) fn host_shader(container: &[u8]) -> Result<HostShader, String> {
-    let translate = |c: &[u8]| victory_shader::emit::translate(c).map_err(|e| e.to_string());
+pub(crate) fn host_shader(
+    container: &[u8],
+    parsed: &victory_shader::Container<'_>,
+    programs: &[victory_shader::NativeProgram],
+) -> Result<HostShader, String> {
+    let translate = |_: &[u8]| {
+        victory_shader::emit::translate_programs(parsed, programs).map_err(|e| e.to_string())
+    };
     match CACHE.get() {
         Some(cache) => {
             cached(cache, &build(), container, translate, refresh_in_runs()).map(|(shader, _)| shader)

@@ -998,6 +998,22 @@ mod tests {
     }
 
     #[test]
+    fn translating_decoded_programs_matches_translating_the_container() {
+        use crate::dxbc::{Container, FourCC, build};
+
+        let end = 0xbf81_0000u32.to_le_bytes(); // s_endpgm
+        let native = xbch(&fssm(&[(HwStage::Ps, &end)]));
+        let dxil = part(&[(KIND_NATIVE, &native)]);
+        let bytes = build(&[(FourCC::DXIL, &dxil)]);
+        let parsed = Container::parse(&bytes).unwrap();
+        let programs = native_programs(parsed.part(FourCC::DXIL).unwrap().data).unwrap();
+        assert_eq!(
+            crate::emit::translate_programs(&parsed, &programs).unwrap(),
+            crate::emit::translate(&bytes).unwrap(),
+        );
+    }
+
+    #[test]
     fn finds_programs_stored_without_xbch() {
         let blob = fssm(&[(HwStage::Vs, &VS_CODE), (HwStage::Ps, &PS_CODE)]);
         let raw = native_programs(&part(&[(0x12, &[0; 16]), (KIND_NATIVE_RAW, &blob)])).unwrap();

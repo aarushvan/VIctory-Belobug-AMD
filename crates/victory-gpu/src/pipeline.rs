@@ -229,15 +229,16 @@ impl Shader {
 
 #[cfg(windows)]
 fn translate(container: &[u8]) -> Result<Translated, String> {
-    use victory_shader::{Container, FourCC, HwStage};
+    use victory_shader::{Container, FourCC, HwStage, ShaderError};
     // The translation depends on it (a view index past a capped heap).
     crate::descriptor::host::probe_view_limit();
     let (c, container) = Container::parse_prefix(container).map_err(|e| e.to_string())?;
-    let programs = match c.part(FourCC::DXIL).or(c.part(FourCC::ACCC)) {
-        Some(part) => victory_shader::native_programs(part.data).map_err(|e| e.to_string())?,
-        None => Vec::new(),
-    };
-    let host = crate::shader_cache::host_shader(container)?;
+    let part = c
+        .part(FourCC::DXIL)
+        .or(c.part(FourCC::ACCC))
+        .ok_or_else(|| ShaderError::Malformed("no DXIL part").to_string())?;
+    let programs = victory_shader::native_programs(part.data).map_err(|e| e.to_string())?;
+    let host = crate::shader_cache::host_shader(container, &c, &programs)?;
     let stores = programs.is_empty() || programs.iter().any(stores);
     let threads = programs.iter().find_map(|p| match &p.io {
         victory_shader::native::StageIo::Cs(cs) if cs.threads.iter().all(|&n| n > 0) => Some(cs.threads),

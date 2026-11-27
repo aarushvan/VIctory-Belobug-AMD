@@ -399,25 +399,23 @@ pub struct UserData {
 /// a program: with that on for every program, 69 compute programs that
 /// already translated came out changed (`CS_RaytracingResolve`, ...).
 pub fn translate(container: &[u8]) -> Result<HostShader, ShaderError> {
-    match translate_plain(container) {
-        Err(ShaderError::Unsupported { what, .. }) if what == lower::FIRST_HALF => {
-            lower::with_first_half_pairs(|| translate_plain(container))
-        }
-        Err(ShaderError::Unsupported { what, .. }) if what == lower::MASK_ELSEWHERE => {
-            lower::with_mask_ops_on_numbers(|| translate_plain(container))
-        }
-        other => other,
-    }
-}
-
-fn translate_plain(container: &[u8]) -> Result<HostShader, ShaderError> {
     let c = Container::parse(container)?;
     let dxil = c
         .part(FourCC::DXIL)
         .or(c.part(FourCC::ACCC))
         .ok_or(ShaderError::Malformed("no DXIL part"))?;
-    let native = crate::native_programs(dxil.data)?
-        .into_iter()
+    let programs = crate::native_programs(dxil.data)?;
+    translate_programs(&c, &programs)
+}
+
+/// Translates a container whose native programs were already decoded for
+/// the runtime's shader metadata.
+pub fn translate_programs(
+    c: &Container,
+    programs: &[NativeProgram],
+) -> Result<HostShader, ShaderError> {
+    let native = programs
+        .iter()
         .find(|p| {
             matches!(
                 p.stage,
@@ -428,14 +426,14 @@ fn translate_plain(container: &[u8]) -> Result<HostShader, ShaderError> {
             offset: 0,
             what: "a container without a vertex, pixel, compute or mesh program",
         })?;
-    let p = crate::spill::build(&native)?;
+    let p = crate::spill::build(native)?;
     // Structurisation first: tracing per-lane descriptors needs it (its
     // failure is reported after the earlier stages').
     let st = structure::structure(&p);
     let res = resource::track(&p, &native.layout, native.stage, st.as_ref().ok())?;
-    let io = io::raise(&p, &native)?;
+    let io = io::raise(&p, native)?;
     let st = st?;
-    emit(&c, &native, &p, &st, &io, &res)
+    emit_with_retries(c, native, &p, &st, &io, &res)
 }
 
 /// [`emit`] with the same second tries as [`translate`] (first halves of

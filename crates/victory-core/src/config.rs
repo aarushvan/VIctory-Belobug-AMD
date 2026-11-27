@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-use crate::policy::ensure_outside_repo;
+use crate::policy::{ensure_outside_repo, resolve};
 
 #[derive(Debug, Default, Clone)]
 pub struct Config {
@@ -94,6 +94,7 @@ impl Config {
         let data_dir = env_path("VICTORY_DATA_DIR")
             .or(file.data_dir)
             .map_or_else(|| default_dir("data"), Ok)?;
+        ensure_data_outside_cache(&cache_dir, &data_dir)?;
         Ok(Config {
             game_dir: env_path("VICTORY_GAME_DIR").or(file.game_dir),
             fidelityfx_dir: env_path("VICTORY_FIDELITYFX_DIR").or(file.fidelityfx_dir),
@@ -114,12 +115,18 @@ impl Config {
 
     /// Returns `<cache>/<sub>`, creating it, after checking the asset policy.
     pub fn cache_subdir(&self, sub: &str) -> Result<PathBuf> {
-        subdir(&self.cache_dir, sub)
+        create_subdir(self.cache_dir.join(sub))
     }
 
     /// Returns `<data>/<sub>`, creating it, after checking the asset policy.
     pub fn data_subdir(&self, sub: &str) -> Result<PathBuf> {
-        subdir(&self.data_dir, sub)
+        let dir = self.data_dir.join(sub);
+        ensure_data_outside_cache(&self.cache_dir, &dir)?;
+        let dir = create_subdir(dir)?;
+        // Creation makes the filesystem resolve aliases in the missing tail,
+        // such as another capitalization of a cache path on Windows.
+        ensure_data_outside_cache(&self.cache_dir, &dir)?;
+        Ok(dir)
     }
 }
 
@@ -131,8 +138,18 @@ fn explicit_config_path(env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Opt
         .map(PathBuf::from)
 }
 
-fn subdir(root: &Path, sub: &str) -> Result<PathBuf> {
-    let dir = root.join(sub);
+fn ensure_data_outside_cache(cache: &Path, data: &Path) -> Result<()> {
+    anyhow::ensure!(
+        !resolve(data)?.starts_with(resolve(cache)?),
+        "persistent data directory {} is inside the cache {}; set VICTORY_DATA_DIR or \
+         [paths].data_dir to a directory outside the cache",
+        data.display(),
+        cache.display()
+    );
+    Ok(())
+}
+
+fn create_subdir(dir: PathBuf) -> Result<PathBuf> {
     ensure_outside_repo(&dir)?;
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     Ok(dir)
@@ -216,6 +233,66 @@ mod tests {
         let text = include_str!("../../../victory.example.toml");
         let parsed: FileConfig = toml::from_str(text).unwrap();
         assert!(parsed.paths.game_dir.is_some());
+    }
+
+    #[test]
+    fn rejects_persistent_data_at_or_under_the_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = root.path().join("cache");
+        for data in [
+            cache.clone(),
+            cache.join("saves"),
+            root.path().join("uncreated").join("..").join("cache/saves"),
+        ] {
+            let paths = FilePaths {
+                cache_dir: Some(cache.clone()),
+                data_dir: Some(data),
+                ..Default::default()
+            };
+            let error = Config::resolve(paths, None, |_| None).unwrap_err();
+            assert!(error.to_string().contains("inside the cache"), "{error}");
+        }
+
+        let data = root.path().join("cache-backup");
+        let paths = FilePaths {
+            cache_dir: Some(cache),
+            data_dir: Some(data.clone()),
+            ..Default::default()
+        };
+        assert_eq!(
+            Config::resolve(paths, None, |_| None).unwrap().data_dir,
+            data
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn data_subdir_rejects_a_symlink_into_the_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = root.path().join("cache");
+        let data = root.path().join("data");
+        std::fs::create_dir(&cache).unwrap();
+        std::fs::create_dir(&data).unwrap();
+        std::os::unix::fs::symlink(&cache, data.join("alias")).unwrap();
+        let cfg = Config {
+            cache_dir: cache.clone(),
+            data_dir: data,
+            ..Default::default()
+        };
+        assert!(cfg.data_subdir("alias/saves").is_err());
+        assert!(!cache.join("saves").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn data_subdir_rejects_a_case_alias_for_a_new_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let cfg = Config {
+            cache_dir: root.path().join("cache"),
+            data_dir: root.path().join("CACHE"),
+            ..Default::default()
+        };
+        assert!(cfg.data_subdir("saves").is_err());
     }
 
     #[test]

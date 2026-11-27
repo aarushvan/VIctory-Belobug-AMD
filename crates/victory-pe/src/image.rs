@@ -441,14 +441,12 @@ fn va_to_rva(va: u64, image_base: u64) -> Result<u32, PeError> {
 mod tests {
     use super::*;
 
-    /// The test binary itself is a real MSVC-linked PE32+ image.
-    fn own_image() -> Vec<u8> {
-        std::fs::read(std::env::current_exe().unwrap()).unwrap()
-    }
-
+    // Retain an integration check against a real MSVC-linked PE32+ image.
+    #[cfg(all(windows, target_arch = "x86_64", target_env = "msvc"))]
     #[test]
     fn parses_own_test_binary() {
-        let info = ImageInfo::parse(&own_image()).unwrap();
+        let data = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+        let info = ImageInfo::parse(&data).unwrap();
         assert_eq!(info.machine, MACHINE_AMD64);
         assert!(!info.is_dll());
         assert!(info.entry_rva != 0);
@@ -467,15 +465,15 @@ mod tests {
 
     #[test]
     fn rva_to_file_offset_maps_entry_point() {
-        let data = own_image();
+        let data = synthetic_image(&[]);
         let info = ImageInfo::parse(&data).unwrap();
-        let off = info.rva_to_file_offset(info.entry_rva).unwrap() as usize;
-        assert!(off < data.len());
+        assert_eq!(info.entry_rva, 0x1040);
+        assert_eq!(info.rva_to_file_offset(info.entry_rva), Some(0x240));
     }
 
     #[test]
     fn rva_to_file_offset_rejects_offsets_past_4_gib() {
-        let mut info = ImageInfo::parse(&own_image()).unwrap();
+        let mut info = ImageInfo::parse(&synthetic_image(&[])).unwrap();
         let rva = info.sections[0].rva + 0x20;
         assert!(info.rva_to_file_offset(rva).is_some());
         // Used to overflow (a panic in debug builds, a wrong offset in
@@ -488,20 +486,18 @@ mod tests {
     fn rejects_garbage_without_panicking() {
         assert!(ImageInfo::parse(b"").is_err());
         assert!(ImageInfo::parse(b"MZ not really").is_err());
-        let mut truncated = own_image();
+        let mut truncated = synthetic_image(&[]);
         truncated.truncate(0x200);
         assert!(ImageInfo::parse(&truncated).is_err());
     }
 
     #[test]
     fn rejects_iat_outside_image() {
-        let mut data = own_image();
-        let dd = layout::data_directory_offset(&data, dir::IMPORT).unwrap();
-        let import_rva = layout::read_u32(&data, dd).unwrap();
-        let desc = ImageInfo::parse(&data)
-            .unwrap()
-            .rva_to_file_offset(import_rva)
-            .unwrap() as usize;
+        let mut data = synthetic_import_image();
+        let info = ImageInfo::parse(&data).unwrap();
+        assert_eq!(info.imports[0].entries[0].symbol, ImportSymbol::Ordinal(42));
+        assert_eq!(info.imports[0].entries[0].iat_slot_rva, 0x1050);
+        let desc = info.rva_to_file_offset(0x1000).unwrap() as usize;
         // First descriptor's FirstThunk, at the 4 GiB limit: used to overflow.
         data[desc + 16..desc + 20].copy_from_slice(&0xFFFF_FFF8u32.to_le_bytes());
         assert!(matches!(
@@ -509,6 +505,29 @@ mod tests {
             Err(PeError::Malformed(_))
         ));
     }
+
+    fn synthetic_import_image() -> Vec<u8> {
+        // One descriptor and its terminator, followed by the DLL name and
+        // two thunk tables containing the same ordinal import.
+        let mut body = [0u8; 0x60];
+        body[0..4].copy_from_slice(&0x1040u32.to_le_bytes()); // OriginalFirstThunk
+        body[12..16].copy_from_slice(&0x1030u32.to_le_bytes()); // Name
+        body[16..20].copy_from_slice(&0x1050u32.to_le_bytes()); // FirstThunk
+        body[0x30..0x3c].copy_from_slice(b"example.dll\0");
+        let thunk = (pe::IMAGE_ORDINAL_FLAG64 | 42).to_le_bytes();
+        body[0x40..0x48].copy_from_slice(&thunk);
+        body[0x50..0x58].copy_from_slice(&thunk);
+
+        let mut data = synthetic_image(&body);
+        let exports =
+            layout::data_directory_offset(&data, pe::IMAGE_DIRECTORY_ENTRY_EXPORT).unwrap();
+        data[exports..exports + layout::DATA_DIRECTORY_SIZE].fill(0);
+        let imports = layout::data_directory_offset(&data, dir::IMPORT).unwrap();
+        data[imports..imports + 4].copy_from_slice(&0x1000u32.to_le_bytes());
+        data[imports + 4..imports + 8].copy_from_slice(&40u32.to_le_bytes());
+        data
+    }
+
     /// A minimal PE32+ image: one section at RVA 0x1000 holding `body`, with
     /// the export directory (RVA 0x1000, 0x80 bytes) pointing at it.
     fn synthetic_image(body: &[u8]) -> Vec<u8> {
@@ -522,6 +541,7 @@ mod tests {
         d[0x56..0x58].copy_from_slice(&0x2022u16.to_le_bytes()); // DLL, large address aware
         let opt = 0x58;
         d[opt..opt + 2].copy_from_slice(&0x20Bu16.to_le_bytes());
+        d[opt + 16..opt + 20].copy_from_slice(&0x1040u32.to_le_bytes()); // entry point
         d[opt + 24..opt + 32].copy_from_slice(&0x1_8000_0000u64.to_le_bytes());
         d[opt + 32..opt + 36].copy_from_slice(&0x1000u32.to_le_bytes());
         d[opt + 36..opt + 40].copy_from_slice(&0x200u32.to_le_bytes());

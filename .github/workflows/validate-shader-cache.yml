@@ -18,3 +18,5 @@ jobs:
           cargo test --locked -p victory shader::
       - run: cargo test --locked -p victory-gpu --lib shader_cache::tests
       - run: cargo test --locked -p victory warm::tests
+      - run: cargo test --locked -p victory-shader --lib emit::bitcode::opt::tests
+      - run: cargo test --locked -p victory-gpu --all-features --lib draw::tests

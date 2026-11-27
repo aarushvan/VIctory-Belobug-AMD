@@ -16,3 +16,4 @@ jobs:
       - run: rustup toolchain install
       - run: |
           cargo test --locked -p victory shader::
+      - run: cargo test --locked -p victory-gpu --lib shader_cache::tests
